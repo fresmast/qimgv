@@ -7,6 +7,7 @@ target_sources(qimgv PRIVATE
     imagelib.cpp
     inputmap.cpp
     randomizer.cpp
+    rpgmakerimage.cpp
     script.cpp
     sleep.cpp
     stuff.cpp

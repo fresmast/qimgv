@@ -6,6 +6,7 @@
  */
 
 #include "core.h"
+#include "utils/rpgmakerimage.h"
 
 #ifdef __WIN32
 #include <tchar.h>
@@ -1240,7 +1241,7 @@ bool Core::loadPath(QString path) {
             QStringList types = settings->supportedMimeTypes();
             QMimeDatabase db;
             QMimeType type = db.mimeTypeForFile(fileInfo.absoluteFilePath());
-            if(types.contains(type.name())) {
+            if(types.contains(type.name()) || RpgMakerImage::isSupportedFormat(fileInfo.suffix())) {
                 if(model->forceInsert(fileInfo.absoluteFilePath())) {
                     index = model->indexOfFile(fileInfo.absoluteFilePath());
                 }

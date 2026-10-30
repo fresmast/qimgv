@@ -1,4 +1,5 @@
 #include "thumbnailerrunnable.h"
+#include "utils/rpgmakerimage.h"
 
 ThumbnailerRunnable::ThumbnailerRunnable(ThumbnailCache* _cache, QString _path, int _size, bool _crop, bool _force) :
     path(_path),
@@ -91,6 +92,36 @@ ThumbnailerRunnable::~ThumbnailerRunnable() {
 }
 
 std::pair<QImage*, QSize> ThumbnailerRunnable::createThumbnail(QString path, const char *format, int size, bool squared) {
+    if(format && RpgMakerImage::isSupportedFormat(QString::fromLatin1(format))) {
+        QImage *fullSize = new QImage(RpgMakerImage::decode(path, QString::fromLatin1(format)));
+        if(fullSize->isNull()) {
+            delete fullSize;
+            return std::make_pair(new QImage(), QSize());
+        }
+        if(fullSize->format() == QImage::Format_Indexed8) {
+            auto newFmt = fullSize->hasAlphaChannel() ? QImage::Format_ARGB32 : QImage::Format_RGB32;
+            QImage *converted = new QImage(fullSize->convertToFormat(newFmt));
+            delete fullSize;
+            fullSize = converted;
+        }
+
+        QSize originalSize = fullSize->size();
+        Qt::AspectRatioMode ARMode = squared?
+                    (Qt::KeepAspectRatioByExpanding):(Qt::KeepAspectRatio);
+        QSize scaledSize = originalSize.scaled(size, size, ARMode);
+        QImage *result = nullptr;
+        if(squared) {
+            QRect clip(0, 0, size, size);
+            QRect scaledRect(QPoint(0,0), scaledSize);
+            clip.moveCenter(scaledRect.center());
+            QImage scaled = fullSize->scaled(scaledSize, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+            result = ImageLib::croppedRaw(&scaled, clip);
+        } else {
+            result = new QImage(fullSize->scaled(scaledSize, Qt::IgnoreAspectRatio, Qt::SmoothTransformation));
+        }
+        delete fullSize;
+        return std::make_pair(result, originalSize);
+    }
     QImageReader *reader = new QImageReader(path, format);
     Qt::AspectRatioMode ARMode = squared?
                 (Qt::KeepAspectRatioByExpanding):(Qt::KeepAspectRatio);

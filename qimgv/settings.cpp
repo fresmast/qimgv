@@ -1,4 +1,5 @@
 #include "settings.h"
+#include "utils/rpgmakerimage.h"
 
 Settings *settings = nullptr;
 
@@ -311,7 +312,13 @@ void Settings::setMpvBinary(QString path) {
 //------------------------------------------------------------------------------
 QList<QByteArray> Settings::supportedFormats() {
     auto formats = QImageReader::supportedImageFormats();
-    formats << "jfif";
+    if(!formats.contains("jfif"))
+        formats << "jfif";
+    for(const QString &format : RpgMakerImage::supportedFormats()) {
+        const QByteArray extension = format.toUtf8();
+        if(!formats.contains(extension))
+            formats << extension;
+    }
     if(videoPlayback())
         formats << mVideoFormatsMap.values();
     formats.removeAll("pdf");

@@ -132,6 +132,20 @@ qimgv can open some extra formats via third-party image plugins. All of them are
 | HEIF / HEIC | [github.com/jakar/qt-heif-image-plugin](https://github.com/jakar/qt-heif-image-plugin) |
 | RAW | [https://gitlab.com/mardy/qtraw](https://gitlab.com/mardy/qtraw) |
 
+## RPG Maker image formats
+
+The following formats are supported out of the box, without extra plugins:
+
+| Format | Extension | Engine |
+| ------ | --------- | ------ |
+| Encrypted image | `.rpgmvp` | RPG Maker MV |
+| Encrypted image | `.png_` | RPG Maker MZ |
+
+MV/MZ images are decrypted in memory. The encryption key is read from the game's
+`data/System.json` or `www/data/System.json`; PNG-based images can also be opened
+without a key by recovering it from the PNG header. RGSSAD/RGSS2A/RGSS3A archives
+are not supported.
+
 # Installation
 
 ## Windows

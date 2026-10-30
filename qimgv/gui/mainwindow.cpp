@@ -1,4 +1,5 @@
 #include "mainwindow.h"
+#include "utils/rpgmakerimage.h"
 
 // TODO: nuke this and rewrite
 
@@ -568,8 +569,14 @@ QString MW::getSaveFileName(QString filePath) {
     QString filterString = filters.join(";; ");
 
     // find matching filter for the current image
-    QString selectedFilter = "JPEG (*.jpg *.jpeg *jpe *jfif)";
     QFileInfo fi(filePath);
+    QString selectedFilter = "JPEG (*.jpg *.jpeg *jpe *jfif)";
+    if(RpgMakerImage::isSupportedFormat(fi.suffix())) {
+        // Encrypted containers are read-only; offer a normal PNG instead.
+        filePath = fi.absolutePath() + "/" + fi.completeBaseName() + ".png";
+        selectedFilter = "PNG (*.png)";
+        fi.setFile(filePath);
+    }
     for(auto filter : filters) {
         if(filter.contains(fi.suffix().toLower())) {
             selectedFilter = filter;

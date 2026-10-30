@@ -323,16 +323,22 @@ void DirectoryManager::addEntriesFromDirectory(std::vector<FSEntry> &entryVec, Q
     QRegularExpressionMatch match;
     for(const auto & entry : fs::directory_iterator(toStdString(directoryPath))) {
         QString name = QString::fromStdString(entry.path().filename().generic_string());
+        QString path = QString::fromStdString(entry.path().generic_string());
 #ifndef Q_OS_WIN32
         // ignore hidden files
         if(!settings->showHiddenFiles() && name.startsWith("."))
             continue;
 #else
-        DWORD attributes = GetFileAttributes(entry.path().generic_string().c_str());
-        if(!settings->showHiddenFiles() && attributes & FILE_ATTRIBUTE_HIDDEN)
+        // Never use GetFileAttributesA here: the path above is UTF-8, while the
+        // A variant interprets it using the ANSI code page. For any non-ASCII
+        // name it fails and returns INVALID_FILE_ATTRIBUTES (0xFFFFFFFF), whose
+        // FILE_ATTRIBUTE_HIDDEN bit is set, so every entry in such a folder was
+        // silently treated as hidden and dropped from the list.
+        const DWORD attributes = GetFileAttributesW(path.toStdWString().c_str());
+        if(!settings->showHiddenFiles() && attributes != INVALID_FILE_ATTRIBUTES
+                && attributes & FILE_ATTRIBUTE_HIDDEN)
             continue;
 #endif
-        QString path = QString::fromStdString(entry.path().generic_string());
         match = regex.match(name);
         if(entry.is_directory()) { // this can still throw std::bad_alloc ..
             FSEntry newEntry;

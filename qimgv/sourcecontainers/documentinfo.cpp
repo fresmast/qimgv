@@ -1,4 +1,5 @@
 #include "documentinfo.h"
+#include "utils/rpgmakerimage.h"
 
 DocumentInfo::DocumentInfo(QString path)
     : mDocumentType(DocumentType::NONE),
@@ -74,10 +75,16 @@ int DocumentInfo::exifOrientation() const {
 void DocumentInfo::detectFormat() {
     if(mDocumentType != DocumentType::NONE)
         return;
+    const QString suffixString = fileInfo.suffix().toLower();
+    if(RpgMakerImage::isSupportedFormat(suffixString)) {
+        mFormat = suffixString;
+        mDocumentType = DocumentType::STATIC;
+        return;
+    }
     QMimeDatabase mimeDb;
     mMimeType = mimeDb.mimeTypeForFile(fileInfo.filePath(), QMimeDatabase::MatchContent);
     auto mimeName = mMimeType.name().toUtf8();
-    auto suffix = fileInfo.suffix().toLower().toUtf8();
+    auto suffix = suffixString.toUtf8();
     if(mimeName == "image/jpeg") {
         mFormat = "jpg";
         mDocumentType = DocumentType::STATIC;
@@ -189,11 +196,18 @@ void DocumentInfo::loadExifTags() {
         return;
     exifLoaded = true;
     exifTags.clear();
+    if(RpgMakerImage::isSupportedFormat(mFormat))
+        return;
 #ifdef USE_EXIV2
     try {
         std::unique_ptr<Exiv2::Image> image;
 
+#if EXIV2_TEST_VERSION(0, 28, 0)
+        // Exiv2 0.28 removed the wide-string overload on Windows.
+        image = Exiv2::ImageFactory::open(fileInfo.filePath().toUtf8().toStdString());
+#else
         image = Exiv2::ImageFactory::open(toStdString(fileInfo.filePath()));
+#endif
 
         assert(image.get() != 0);
         image->readMetadata();
@@ -298,7 +312,8 @@ QMap<QString, QString> DocumentInfo::getExifTags() {
 }
 
 void DocumentInfo::loadExifOrientation() {
-    if(mDocumentType == DocumentType::VIDEO || mDocumentType == DocumentType::NONE)
+    if(mDocumentType == DocumentType::VIDEO || mDocumentType == DocumentType::NONE ||
+       RpgMakerImage::isSupportedFormat(mFormat))
         return;
 
     QString path = filePath();

@@ -1,4 +1,5 @@
 #include "imagestatic.h"
+#include "utils/rpgmakerimage.h"
 #include <time.h>
 
 ImageStatic::ImageStatic(QString _path)
@@ -23,8 +24,17 @@ void ImageStatic::load() {
     }
     if(mDocInfo->mimeType().name() == "image/vnd.microsoft.icon")
         loadICO();
+    else if(RpgMakerImage::isSupportedFormat(mDocInfo->format()))
+        loadRpgMaker();
     else
         loadGeneric();
+}
+
+void ImageStatic::loadRpgMaker() {
+    std::unique_ptr<const QImage> img(
+        new QImage(RpgMakerImage::decode(mPath, mDocInfo->format())));
+    image = std::move(img);
+    mLoaded = true;
 }
 
 
@@ -79,6 +89,12 @@ QString ImageStatic::generateHash(QString str) {
 
 // TODO: move saving to directorymodel
 bool ImageStatic::save(QString destPath) {
+    // Writing encrypted RPG Maker containers is not supported. Refuse before
+    // the backup/restore code below touches the original file.
+    if(RpgMakerImage::isSupportedFormat(QFileInfo(destPath).suffix())) {
+        qDebug() << "ImageStatic::save() - cannot write RPG Maker container:" << destPath;
+        return false;
+    }
     QString tmpPath = destPath + "_" + generateHash(destPath);
     QFileInfo fi(destPath);
     QString ext = fi.suffix();
