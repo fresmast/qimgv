@@ -1,5 +1,5 @@
 #include "imagestatic.h"
-#include "utils/rpgmakerimage.h"
+#include "utils/encryptedimage.h"
 #include <time.h>
 
 ImageStatic::ImageStatic(QString _path)
@@ -24,15 +24,15 @@ void ImageStatic::load() {
     }
     if(mDocInfo->mimeType().name() == "image/vnd.microsoft.icon")
         loadICO();
-    else if(RpgMakerImage::isSupportedFormat(mDocInfo->format()))
-        loadRpgMaker();
+    else if(EncryptedImage::isSupportedFormat(mDocInfo->format()))
+        loadEncrypted();
     else
         loadGeneric();
 }
 
-void ImageStatic::loadRpgMaker() {
+void ImageStatic::loadEncrypted() {
     std::unique_ptr<const QImage> img(
-        new QImage(RpgMakerImage::decode(mPath, mDocInfo->format())));
+        new QImage(EncryptedImage::decode(mPath, mDocInfo->format())));
     image = std::move(img);
     mLoaded = true;
 }
@@ -47,12 +47,24 @@ void ImageStatic::loadGeneric() {
      *
      * tldr: qimage bad
      */
-    QImageReader r(mPath, mDocInfo->format().toStdString().c_str());
-#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
-    r.setAllocationLimit(settings->memoryAllocationLimit());
-#endif
     QImage *tmp = new QImage();
-    r.read(tmp);
+    {
+        QImageReader r(mPath, mDocInfo->format().toStdString().c_str());
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+        r.setAllocationLimit(settings->memoryAllocationLimit());
+#endif
+        r.read(tmp);
+    }
+    // The extension can lie: some games ship encrypted ".png_" or ".gax"
+    // images named ".png". Qt cannot decode those, so give the container
+    // decoder a chance before reporting a broken file.
+    if(tmp->isNull()) {
+        const QString containerFormat = EncryptedImage::detectFormat(mPath);
+        if(!containerFormat.isEmpty()) {
+            delete tmp;
+            tmp = new QImage(EncryptedImage::decode(mPath, containerFormat));
+        }
+    }
     std::unique_ptr<const QImage> img(tmp);
     img = ImageLib::exifRotated(std::move(img), mDocInfo.get()->exifOrientation());
     // scaling this format via qt results in transparent background
@@ -91,7 +103,7 @@ QString ImageStatic::generateHash(QString str) {
 bool ImageStatic::save(QString destPath) {
     // Writing encrypted RPG Maker containers is not supported. Refuse before
     // the backup/restore code below touches the original file.
-    if(RpgMakerImage::isSupportedFormat(QFileInfo(destPath).suffix())) {
+    if(EncryptedImage::isSupportedFormat(QFileInfo(destPath).suffix())) {
         qDebug() << "ImageStatic::save() - cannot write RPG Maker container:" << destPath;
         return false;
     }

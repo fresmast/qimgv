@@ -23,9 +23,18 @@ public:
     // Returns a null QImage on failure.
     static QImage decode(const QString &path, const QString &format);
 
+    // Content based check: reports whether the first bytes of a file look like
+    // an encrypted container rather than a real image. Used for files whose
+    // extension lies, for example a MZ ".png_" image named ".png".
+    static bool looksEncrypted(const QByteArray &header);
+
+    // Decodes plain image bytes (PNG, JPEG, WebP...) honoring the configured
+    // memory limits. Also used by EncryptedImage for the payloads of other
+    // container formats.
+    static QImage decodeImageData(const QByteArray &data, const QString &path);
+
 private:
     static QImage decodeEncrypted(const QString &path);
-    static QImage decodeImageData(const QByteArray &data, const QString &path);
 
     static QList<QByteArray> findKeyCandidates(const QString &path);
     static QByteArray readSystemKey(const QString &systemJsonPath);

@@ -50,6 +50,15 @@ QImage RpgMakerImage::decode(const QString &path, const QString &format) {
     return decodeEncrypted(path);
 }
 
+bool RpgMakerImage::looksEncrypted(const QByteArray &header) {
+    // A normal image header means this is a real image, not a container.
+    if(isKnownImageHeader(header.left(kFakeHeaderSize)))
+        return false;
+    // Encrypted PNG payloads keep the plain IHDR data and a matching IHDR CRC
+    // after the encrypted 16 byte header, which is a reliable signature.
+    return isPngPayload(header);
+}
+
 QImage RpgMakerImage::decodeEncrypted(const QString &path) {
     QFile file(path);
     if(!file.open(QIODevice::ReadOnly)) {

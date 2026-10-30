@@ -1,5 +1,5 @@
 #include "settings.h"
-#include "utils/rpgmakerimage.h"
+#include "utils/encryptedimage.h"
 
 Settings *settings = nullptr;
 
@@ -314,7 +314,7 @@ QList<QByteArray> Settings::supportedFormats() {
     auto formats = QImageReader::supportedImageFormats();
     if(!formats.contains("jfif"))
         formats << "jfif";
-    for(const QString &format : RpgMakerImage::supportedFormats()) {
+    for(const QString &format : EncryptedImage::supportedFormats()) {
         const QByteArray extension = format.toUtf8();
         if(!formats.contains(extension))
             formats << extension;

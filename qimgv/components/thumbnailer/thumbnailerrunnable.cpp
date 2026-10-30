@@ -1,5 +1,5 @@
 #include "thumbnailerrunnable.h"
-#include "utils/rpgmakerimage.h"
+#include "utils/encryptedimage.h"
 
 ThumbnailerRunnable::ThumbnailerRunnable(ThumbnailCache* _cache, QString _path, int _size, bool _crop, bool _force) :
     path(_path),
@@ -92,8 +92,8 @@ ThumbnailerRunnable::~ThumbnailerRunnable() {
 }
 
 std::pair<QImage*, QSize> ThumbnailerRunnable::createThumbnail(QString path, const char *format, int size, bool squared) {
-    if(format && RpgMakerImage::isSupportedFormat(QString::fromLatin1(format))) {
-        QImage *fullSize = new QImage(RpgMakerImage::decode(path, QString::fromLatin1(format)));
+    if(format && EncryptedImage::isSupportedFormat(QString::fromLatin1(format))) {
+        QImage *fullSize = new QImage(EncryptedImage::decode(path, QString::fromLatin1(format)));
         if(fullSize->isNull()) {
             delete fullSize;
             return std::make_pair(new QImage(), QSize());

@@ -3,6 +3,7 @@
 target_sources(qimgv PRIVATE
     actions.cpp
     cmdoptionsrunner.cpp
+    encryptedimage.cpp
     imagefactory.cpp
     imagelib.cpp
     inputmap.cpp

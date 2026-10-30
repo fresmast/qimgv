@@ -1,5 +1,5 @@
 #include "documentinfo.h"
-#include "utils/rpgmakerimage.h"
+#include "utils/encryptedimage.h"
 
 DocumentInfo::DocumentInfo(QString path)
     : mDocumentType(DocumentType::NONE),
@@ -76,7 +76,7 @@ void DocumentInfo::detectFormat() {
     if(mDocumentType != DocumentType::NONE)
         return;
     const QString suffixString = fileInfo.suffix().toLower();
-    if(RpgMakerImage::isSupportedFormat(suffixString)) {
+    if(EncryptedImage::isSupportedFormat(suffixString)) {
         mFormat = suffixString;
         mDocumentType = DocumentType::STATIC;
         return;
@@ -119,6 +119,14 @@ void DocumentInfo::detectFormat() {
         mDocumentType = DocumentType::VIDEO;
         mFormat = settings->videoFormats().value(mimeName);
     } else {
+        // Extensions can lie: some games ship their encrypted images with a
+        // ".png" extension. Sniff the first bytes before giving up on the file.
+        const QString containerFormat = EncryptedImage::detectFormat(fileInfo.filePath());
+        if(!containerFormat.isEmpty()) {
+            mFormat = containerFormat;
+            mDocumentType = DocumentType::STATIC;
+            return;
+        }
         // just try to open via suffix if all of the above fails
         mFormat = suffix;
         if(mFormat.compare("jfif", Qt::CaseInsensitive) == 0)
@@ -196,7 +204,7 @@ void DocumentInfo::loadExifTags() {
         return;
     exifLoaded = true;
     exifTags.clear();
-    if(RpgMakerImage::isSupportedFormat(mFormat))
+    if(EncryptedImage::isSupportedFormat(mFormat))
         return;
 #ifdef USE_EXIV2
     try {
@@ -313,7 +321,7 @@ QMap<QString, QString> DocumentInfo::getExifTags() {
 
 void DocumentInfo::loadExifOrientation() {
     if(mDocumentType == DocumentType::VIDEO || mDocumentType == DocumentType::NONE ||
-       RpgMakerImage::isSupportedFormat(mFormat))
+       EncryptedImage::isSupportedFormat(mFormat))
         return;
 
     QString path = filePath();
