@@ -12,6 +12,8 @@ target_sources(qimgv PRIVATE
     script.cpp
     sleep.cpp
     stuff.cpp
+    virtualfs.cpp
     wallpapersetter.cpp
+    ziparchive.cpp
     fileoperations.cpp
 )

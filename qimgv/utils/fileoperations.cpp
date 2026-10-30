@@ -1,10 +1,79 @@
 #include "fileoperations.h"
+#include "virtualfs.h"
+
+#include <QFile>
 
 QString FileOperations::generateHash(const QString &str) {
     return QString(QCryptographicHash::hash(str.toUtf8(), QCryptographicHash::Md5).toHex());
 }
 
+// "Save as": archive entries can not be copied by the filesystem, so the
+// decompressed data is written out manually.
+void FileOperations::copyVirtualFileTo(const QString &srcFilePath, const QString &destDirPath, bool force, FileOpResult &result) {
+    const QByteArray data = VirtualFs::readAll(srcFilePath);
+    if(data.isEmpty()) {
+        result = FileOpResult::SOURCE_DOES_NOT_EXIST;
+        return;
+    }
+    QFileInfo destDir(destDirPath);
+    if(!destDir.exists()) {
+        result = FileOpResult::DESTINATION_DOES_NOT_EXIST;
+        return;
+    }
+    if(!destDir.isWritable()) {
+        result = FileOpResult::DESTINATION_NOT_WRITABLE;
+        return;
+    }
+    const QString destPath = destDirPath + "/" + VirtualFs::fileName(srcFilePath);
+    QFileInfo destFile(destPath);
+    QString tmpPath;
+    bool exists = false;
+    if(destFile.exists()) {
+        if(!destFile.isWritable()) {
+            result = FileOpResult::DESTINATION_NOT_WRITABLE;
+            return;
+        }
+        if(destFile.isDir()) {
+            result = FileOpResult::DESTINATION_DIR_EXISTS;
+            return;
+        }
+        if(!force) {
+            result = FileOpResult::DESTINATION_FILE_EXISTS;
+            return;
+        }
+        tmpPath = destPath + "_" + generateHash(destPath);
+        QFile::remove(tmpPath);
+        QFile::rename(destPath, tmpPath);
+        exists = true;
+    }
+    QFile out(destPath);
+    bool ok = out.open(QIODevice::WriteOnly);
+    if(ok)
+        ok = (out.write(data) == data.size());
+    out.close();
+    if(ok) {
+        result = FileOpResult::SUCCESS;
+        const QDateTime mtime = VirtualFs::lastModified(srcFilePath);
+        QFile dstF(destPath);
+        if(dstF.open(QIODevice::ReadWrite)) {
+            if(mtime.isValid())
+                dstF.setFileTime(mtime, QFileDevice::FileModificationTime);
+            dstF.close();
+        }
+        if(exists)
+            QFile::remove(tmpPath);
+    } else {
+        result = FileOpResult::OTHER_ERROR;
+        if(exists)
+            QFile::rename(tmpPath, destPath);
+    }
+}
+
 void FileOperations::removeFile(const QString &filePath, FileOpResult &result) {
+    if(VirtualFs::isVirtual(filePath)) {
+        result = FileOpResult::READ_ONLY;
+        return;
+    }
     QFileInfo file(filePath);
     if(!file.exists()) {
         result = FileOpResult::SOURCE_DOES_NOT_EXIST;
@@ -23,6 +92,10 @@ void FileOperations::removeFile(const QString &filePath, FileOpResult &result) {
 
 // non-recursive
 void FileOperations::removeDir(const QString &dirPath, bool recursive, FileOpResult &result) {
+    if(VirtualFs::isVirtual(dirPath)) {
+        result = FileOpResult::READ_ONLY;
+        return;
+    }
     QDir dir(dirPath);
     if(!dir.exists()) {
         result = FileOpResult::SOURCE_DOES_NOT_EXIST;
@@ -57,6 +130,8 @@ QString FileOperations::decodeResult(const FileOpResult &result) {
         return QObject::tr("Directory is not empty.");
     case FileOpResult::NOTHING_TO_DO:
         return QObject::tr("Nothing to do.");
+    case FileOpResult::READ_ONLY:
+        return QObject::tr("Archive entries are read-only.");
     case FileOpResult::OTHER_ERROR:
         return QObject::tr("Other error.");
     }
@@ -64,6 +139,10 @@ QString FileOperations::decodeResult(const FileOpResult &result) {
 }
 
 void FileOperations::copyFileTo(const QString &srcFilePath, const QString &destDirPath, bool force, FileOpResult &result) {
+    if(VirtualFs::isVirtual(srcFilePath)) {
+        copyVirtualFileTo(srcFilePath, destDirPath, force, result);
+        return;
+    }
     QFileInfo srcFile(srcFilePath);
     QString tmpPath;
     bool exists = false;
@@ -131,6 +210,11 @@ void FileOperations::copyFileTo(const QString &srcFilePath, const QString &destD
 }
 
 void FileOperations::moveFileTo(const QString &srcFilePath, const QString &destDirPath, bool force, FileOpResult &result) {
+    // Moving out of an archive is really an export: the container is read-only.
+    if(VirtualFs::isVirtual(srcFilePath)) {
+        copyVirtualFileTo(srcFilePath, destDirPath, force, result);
+        return;
+    }
     QFileInfo srcFile(srcFilePath);
     QString tmpPath;
     bool exists = false;
@@ -216,6 +300,10 @@ void FileOperations::moveFileTo(const QString &srcFilePath, const QString &destD
 }
 
 void FileOperations::rename(const QString &srcFilePath, const QString &newName, bool force, FileOpResult &result) {
+    if(VirtualFs::isVirtual(srcFilePath)) {
+        result = FileOpResult::READ_ONLY;
+        return;
+    }
     QFileInfo srcFile(srcFilePath);
     QString tmpPath;
     // error checks
@@ -265,6 +353,10 @@ void FileOperations::rename(const QString &srcFilePath, const QString &newName, 
 }
 
 void FileOperations::moveToTrash(const QString &filePath, FileOpResult &result) {
+    if(VirtualFs::isVirtual(filePath)) {
+        result = FileOpResult::READ_ONLY;
+        return;
+    }
     QFileInfo file(filePath);
     if(!file.exists()) {
         result = FileOpResult::SOURCE_DOES_NOT_EXIST;

@@ -1,5 +1,22 @@
 #include "folderview.h"
 #include "ui_folderview.h"
+#include "utils/virtualfs.h"
+
+#include <algorithm>
+
+namespace {
+QStandardItem *findItemByPath(QStandardItem *item, const QString &path) {
+    if(!item)
+        return nullptr;
+    if(item->data(Qt::UserRole + 1).toString() == path)
+        return item;
+    for(int i = 0; i < item->rowCount(); ++i) {
+        if(QStandardItem *found = findItemByPath(item->child(i), path))
+            return found;
+    }
+    return nullptr;
+}
+} // namespace
 
 FolderView::FolderView(QWidget *parent) :
     FloatingWidgetContainer(parent),
@@ -19,10 +36,9 @@ FolderView::FolderView(QWidget *parent) :
     dirModel->setFilter(QDir::NoDotAndDotDot | QDir::AllDirs);
     ui->dirTreeView->setModel(dirModel);
 
-    QHeaderView* header = ui->dirTreeView->header();
-    header->hideSection(1); // size
-    header->hideSection(2); // type
-    header->hideSection(3); // mod date
+    archiveModel = new QStandardItemModel(this);
+
+    setupFilesystemTree();
 
 #ifdef _WIN32
     dirModel->setRootPath("");
@@ -157,6 +173,9 @@ void FolderView::onTreeViewTabOut() {
 
 // TODO: ask what to do
 void FolderView::onDroppedInByIndex(QList<QString> paths, QModelIndex index) {
+    // archive entries are read-only
+    if(index.model() != dirModel)
+        return;
     emit moveUrlsRequested(paths, dirModel->filePath(index));
 }
 
@@ -273,20 +292,37 @@ void FolderView::onRootBtn() {
 }
 
 void FolderView::setDirectoryPath(QString path) {
+    const bool archiveDir = VirtualFs::isVirtual(path) && VirtualFs::isDirectory(path);
+
 #ifdef __linux
-    if(path.startsWith(QDir::homePath())) {
-        if(dirModel->rootPath() != QDir::homePath()) {
-            dirModel->setRootPath(QDir::homePath());
+    if(!archiveDir) {
+        if(path.startsWith(QDir::homePath())) {
+            if(dirModel->rootPath() != QDir::homePath()) {
+                dirModel->setRootPath(QDir::homePath());
+                QModelIndex idx = dirModel->index(dirModel->rootPath());
+                ui->dirTreeView->setRootIndex(idx);
+            }
+        } else {
+            dirModel->setRootPath("/");
             QModelIndex idx = dirModel->index(dirModel->rootPath());
             ui->dirTreeView->setRootIndex(idx);
         }
-    } else {
-        dirModel->setRootPath("/");
-        QModelIndex idx = dirModel->index(dirModel->rootPath());
-        ui->dirTreeView->setRootIndex(idx);
     }
 #endif
+
+    if(archiveDir) {
+        QString archivePath;
+        QString innerPath;
+        VirtualFs::split(path, archivePath, innerPath);
+        ui->pathLabel->setText(VirtualFs::fileName(archivePath) +
+                               (innerPath.isEmpty() ? QString() : QStringLiteral(" ▸ ") + innerPath));
+        ui->bookmarksWidget->onPathChanged(path);
+        refreshArchiveTree(path);
+        return;
+    }
+
     ui->pathLabel->setText(path);
+    restoreFilesystemTree();
 
     if(ui->dirTreeView->currentIndex().data() == path)
         return;
@@ -310,12 +346,149 @@ void FolderView::setDirectoryPath(QString path) {
     QTimer::singleShot(150, this, &FolderView::fsTreeScrollToCurrent);
 }
 
+// Archives live outside the real filesystem, so their tree is generated on the fly.
+void FolderView::refreshArchiveTree(const QString &path) {
+    QString archivePath;
+    QString innerPath;
+    if(!VirtualFs::split(path, archivePath, innerPath))
+        return;
+
+    // A nested archive ("a.zip!b.zip") keeps its place in the outer tree; the
+    // tree is only rebuilt when a different top level archive is opened.
+    QString topArchive = archivePath;
+    QString topInner;
+    VirtualFs::split(archivePath, topArchive, topInner);
+    const QString rootPath = VirtualFs::join(topArchive, QString());
+
+    if(archiveTreeRoot != rootPath) {
+        archiveTreeRoot = rootPath;
+        archiveModel->clear();
+        archiveModel->setHorizontalHeaderLabels({tr("Name")});
+
+        auto *rootItem = new QStandardItem(QFileInfo(topArchive).fileName());
+        rootItem->setData(rootPath, Qt::UserRole + 1);
+        rootItem->setIcon(iconProvider.icon(QFileIconProvider::Folder));
+        rootItem->setToolTip(topArchive);
+        // archives are read-only: double click must not open the rename editor
+        rootItem->setFlags(rootItem->flags() & ~Qt::ItemIsEditable);
+        archiveModel->appendRow(rootItem);
+        fillArchiveDir(rootItem, topArchive, QString(), 0);
+
+        ui->dirTreeView->setModel(archiveModel);
+    }
+
+    QString nodePath = path;
+    while(nodePath.endsWith('!'))
+        nodePath.chop(1);
+    QStandardItem *target = findArchiveItem(nodePath);
+    if(!target && nodePath == topArchive)
+        target = archiveModel->item(0);
+    if(!target)
+        return;
+
+    // archives inside archives are filled in when they are first opened
+    if(target->rowCount() == 0 && target->parent() != nullptr) {
+        QString nestedArchive;
+        QString nestedInner;
+        if(VirtualFs::split(nodePath, nestedArchive, nestedInner))
+            fillArchiveDir(target, nestedArchive, nestedInner, 1);
+    }
+
+    const QModelIndex targetIndex = target->index();
+    if(ui->dirTreeView->currentIndex() == targetIndex)
+        return;
+    ui->dirTreeView->setCurrentIndex(targetIndex);
+    for(QModelIndex parent = targetIndex.parent(); parent.isValid(); parent = parent.parent())
+        ui->dirTreeView->expand(parent);
+    ui->dirTreeView->expand(targetIndex);
+    ui->dirTreeView->scrollTo(targetIndex);
+}
+
+void FolderView::fillArchiveDir(QStandardItem *parentItem, const QString &archivePath,
+                                const QString &innerPath, int depth) {
+    if(depth >= 8 || parentItem->rowCount() > 2000)
+        return;
+
+    std::vector<VirtualFs::Entry> entries;
+    if(!VirtualFs::listDir(VirtualFs::join(archivePath, innerPath), entries, false))
+        return;
+
+    std::sort(entries.begin(), entries.end(), [](const VirtualFs::Entry &a, const VirtualFs::Entry &b) {
+        return QString::compare(a.name, b.name, Qt::CaseInsensitive) < 0;
+    });
+
+    for(const VirtualFs::Entry &entry : entries) {
+        if(!entry.isDir)
+            continue;
+        auto *item = new QStandardItem(entry.name);
+        item->setData(entry.path, Qt::UserRole + 1);
+        item->setIcon(iconProvider.icon(QFileIconProvider::Folder));
+        // archives are read-only: double click must not open the rename editor
+        item->setFlags(item->flags() & ~Qt::ItemIsEditable);
+        parentItem->appendRow(item);
+
+        // nested archives are expanded on demand: unpacking all of them up
+        // front would be very slow on big game packages
+        if(VirtualFs::isArchivePath(entry.path))
+            continue;
+
+        QString childArchive;
+        QString childInner;
+        if(VirtualFs::split(entry.path, childArchive, childInner))
+            fillArchiveDir(item, childArchive, childInner, depth + 1);
+        if(parentItem->rowCount() > 2000)
+            break;
+    }
+}
+
+QStandardItem *FolderView::findArchiveItem(const QString &path) const {
+    for(int i = 0; i < archiveModel->rowCount(); ++i) {
+        if(QStandardItem *found = findItemByPath(archiveModel->item(i), path))
+            return found;
+    }
+    return nullptr;
+}
+
+// QHeaderView drops hidden sections whenever the model changes, so the
+// "name only" column layout has to be re-applied after every swap.
+void FolderView::setupFilesystemTree() {
+    QHeaderView* header = ui->dirTreeView->header();
+    header->setStretchLastSection(false);
+    header->hideSection(1); // size
+    header->hideSection(2); // type
+    header->hideSection(3); // mod date
+    header->setSectionResizeMode(0, QHeaderView::Stretch);
+}
+
+void FolderView::restoreFilesystemTree() {
+    if(ui->dirTreeView->model() == dirModel)
+        return;
+    archiveTreeRoot.clear();
+    ui->dirTreeView->setModel(dirModel);
+    setupFilesystemTree();
+#ifdef _WIN32
+    // Re-setting the root would reload the model and drop the expanded state.
+    if(!dirModel->rootPath().isEmpty())
+        dirModel->setRootPath(QString());
+#else
+    ui->dirTreeView->setRootIndex(dirModel->index(dirModel->rootPath()));
+#endif
+}
+
 void FolderView::fsTreeScrollToCurrent() {
     ui->dirTreeView->scrollTo(ui->dirTreeView->currentIndex());
 }
 
 void FolderView::onTreeViewClicked(QModelIndex index) {
-    emit directorySelected(dirModel->fileInfo(index).absoluteFilePath());
+    if(!index.isValid())
+        return;
+    if(index.model() == dirModel) {
+        emit directorySelected(dirModel->fileInfo(index).absoluteFilePath());
+        return;
+    }
+    const QString virtualPath = index.data(Qt::UserRole + 1).toString();
+    if(!virtualPath.isEmpty())
+        emit directorySelected(virtualPath);
 }
 
 void FolderView::onBookmarkClicked(QString dirPath) {

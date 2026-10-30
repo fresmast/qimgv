@@ -1,4 +1,5 @@
 #include "directorymodel.h"
+#include "utils/virtualfs.h"
 
 DirectoryModel::DirectoryModel(QObject *parent) :
     QObject(parent),
@@ -224,10 +225,11 @@ bool DirectoryModel::saveFile(const QString &filePath, const QString &destPath) 
             dirManager.updateFileEntry(destPath);
             emit fileModified(destPath);
         } else { // manually add if we are saving to the same dir
-            QFileInfo fiSrc(filePath);
-            QFileInfo fiDest(destPath);
+            const QString srcDir = VirtualFs::isVirtual(filePath)
+                    ? VirtualFs::realDirectory(filePath)
+                    : QFileInfo(filePath).absolutePath();
             // handle same dir
-            if(fiSrc.absolutePath() == fiDest.absolutePath()) {
+            if(srcDir == QFileInfo(destPath).absolutePath()) {
                 // overwrite
                 if(!dirManager.containsFile(destPath) && dirManager.insertFileEntry(destPath))
                     emit fileModified(destPath);

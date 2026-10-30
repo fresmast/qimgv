@@ -1,6 +1,7 @@
 #pragma once
 
 #include "image.h"
+#include <QBuffer>
 #include <QMovie>
 #include <QTimer>
 
@@ -32,6 +33,9 @@ private:
     void load();
     QSize mSize;
     int mFrameCount;
+    // Declared before "movie" so it is destroyed after it: QMovie keeps using
+    // the device until it is destroyed.
+    std::unique_ptr<QBuffer> mBuffer;
     std::shared_ptr<QMovie> movie;
     void loadMovie();
 };

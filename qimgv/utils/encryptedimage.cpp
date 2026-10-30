@@ -118,43 +118,35 @@ bool looksLikeGax(const QByteArray &header) {
     return std::memcmp(header.constData() + kGaxHeaderSize, kPngHeader, kGaxKeySize) == 0;
 }
 
-QImage decodeGax(const QString &path) {
-    QFile file(path);
-    if(!file.open(QIODevice::ReadOnly)) {
-        qWarning() << "EncryptedImage: cannot open" << path;
-        return QImage();
-    }
-    const QByteArray data = file.readAll();
-    file.close();
-
+QImage decodeGax(const QByteArray &data, const QString &name) {
     if(data.isEmpty()) {
-        qWarning() << "EncryptedImage: empty file" << path;
+        qWarning() << "EncryptedImage: empty data" << name;
         return QImage();
     }
 
     if(looksLikeGax(data.left(kGaxHeaderSize + kGaxKeySize))) {
         const QByteArray key = data.mid(4, kGaxKeySize);
         QImage image = RpgMakerImage::decodeImageData(
-            gaxDecryptPayload(data.mid(kGaxHeaderSize), key), path);
+            gaxDecryptPayload(data.mid(kGaxHeaderSize), key), name);
         if(!image.isNull())
             return image;
         // Some files keep the header but not the encryption.
-        image = RpgMakerImage::decodeImageData(data.mid(kGaxHeaderSize), path);
+        image = RpgMakerImage::decodeImageData(data.mid(kGaxHeaderSize), name);
         if(!image.isNull())
             return image;
     }
 
-    // Header stripped or not present at all: try the file as is.
-    QImage image = RpgMakerImage::decodeImageData(data, path);
+    // Header stripped or not present at all: try the data as is.
+    QImage image = RpgMakerImage::decodeImageData(data, name);
     if(!image.isNull())
         return image;
     if(data.size() > kGaxHeaderSize) {
-        image = RpgMakerImage::decodeImageData(data.mid(kGaxHeaderSize), path);
+        image = RpgMakerImage::decodeImageData(data.mid(kGaxHeaderSize), name);
         if(!image.isNull())
             return image;
     }
 
-    qWarning() << "EncryptedImage: cannot decode GAX container" << path;
+    qWarning() << "EncryptedImage: cannot decode GAX container" << name;
     return QImage();
 }
 
@@ -172,13 +164,29 @@ bool EncryptedImage::isSupportedFormat(const QString &format) {
 }
 
 QImage EncryptedImage::decode(const QString &path, const QString &format) {
+    QFile file(path);
+    if(!file.open(QIODevice::ReadOnly)) {
+        qWarning() << "EncryptedImage: cannot open" << path;
+        return QImage();
+    }
+    const QByteArray data = file.readAll();
+    file.close();
+    return decodeData(data, format, path);
+}
+
+QImage EncryptedImage::decodeData(const QByteArray &data, const QString &format,
+                                  const QString &name) {
+    if(data.isEmpty()) {
+        qWarning() << "EncryptedImage: empty data" << name;
+        return QImage();
+    }
     if(RpgMakerImage::isSupportedFormat(format))
-        return RpgMakerImage::decode(path, format);
+        return RpgMakerImage::decodeImageData(data, name);
     if(format.compare(QLatin1String("gax"), Qt::CaseInsensitive) != 0) {
         qWarning() << "EncryptedImage: unsupported container format" << format;
         return QImage();
     }
-    return decodeGax(path);
+    return decodeGax(data, name);
 }
 
 QString EncryptedImage::detectFormat(const QString &path) {
@@ -187,7 +195,10 @@ QString EncryptedImage::detectFormat(const QString &path) {
         return QString();
     const QByteArray header = file.read(kSniffSize);
     file.close();
+    return detectFormat(header);
+}
 
+QString EncryptedImage::detectFormat(const QByteArray &header) {
     if(looksLikeGax(header))
         return QStringLiteral("gax");
     // MV and MZ containers share the same layout and are decoded by the same

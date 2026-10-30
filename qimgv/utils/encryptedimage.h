@@ -29,9 +29,16 @@ public:
     // Returns a null QImage on failure.
     static QImage decode(const QString &path, const QString &format);
 
+    // Same, for data that did not come straight from the file system (archive
+    // entries). name is only used for logging.
+    static QImage decodeData(const QByteArray &data, const QString &format,
+                             const QString &name = QString());
+
     // Looks at the file contents and returns the matching container format, or
     // an empty string if the file is not an encrypted image. Cheap: reads at
     // most 64 bytes. Used for files whose extension does not match their
     // contents.
     static QString detectFormat(const QString &path);
+    // Same, for an already read header (at least 64 bytes for full accuracy).
+    static QString detectFormat(const QByteArray &header);
 };

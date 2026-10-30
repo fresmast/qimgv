@@ -7,6 +7,45 @@
 
 #include "core.h"
 #include "utils/encryptedimage.h"
+#include "utils/virtualfs.h"
+
+#include <QDir>
+#include <QFile>
+
+namespace {
+
+// Archive folders can not be copied by the filesystem: walk the entries and
+// write them out one by one.
+bool exportVirtualDirectory(const QString &srcDir, const QString &destDir) {
+    std::vector<VirtualFs::Entry> entries;
+    if(!VirtualFs::listDir(srcDir, entries, true))
+        return false;
+    if(!QDir().mkpath(destDir))
+        return false;
+    for(const VirtualFs::Entry &entry : entries) {
+        if(entry.isDir)
+            continue;
+        QString relative = entry.path.mid(srcDir.size());
+        while(relative.startsWith('/'))
+            relative.remove(0, 1);
+        if(relative.isEmpty())
+            continue;
+        const QString target = destDir + "/" + relative;
+        QDir().mkpath(QFileInfo(target).absolutePath());
+        const QByteArray data = VirtualFs::readAll(entry.path);
+        if(data.isEmpty())
+            return false;
+        QFile out(target);
+        if(!out.open(QIODevice::WriteOnly) || out.write(data) != data.size()) {
+            qDebug() << "[Core] Could not export" << entry.path << "to" << target;
+            return false;
+        }
+        out.close();
+    }
+    return true;
+}
+
+} // namespace
 
 #ifdef __WIN32
 #include <tchar.h>
@@ -363,8 +402,11 @@ void Core::removePermanent() {
     FileOpResult result;
     int successCount = 0;
     for(auto path : paths) {
-        QFileInfo fi(path);
-        if(fi.isDir())
+        if(VirtualFs::isVirtual(path)) {
+            mw->showError(FileOperations::decodeResult(FileOpResult::READ_ONLY));
+            return;
+        }
+        if(VirtualFs::isDirectory(path))
             model->removeDir(path, false, true, result);
         else
             result = removeFile(path, false);
@@ -397,6 +439,10 @@ void Core::moveToTrash() {
     FileOpResult result;
     int successCount = 0;
     for(auto path : paths) {
+        if(VirtualFs::isVirtual(path)) {
+            mw->showError(FileOperations::decodeResult(FileOpResult::READ_ONLY));
+            return;
+        }
         result = removeFile(path, true);
         if(result == FileOpResult::SUCCESS)
             successCount++;
@@ -769,7 +815,13 @@ void Core::interactiveCopy(QList<QString> paths, QString destDirectory) {
 
 // todo: replacing DIR with a FILE?
 void Core::doInteractiveCopy(QString path, QString destDirectory, DialogResult &overwriteFiles) {
+    if(VirtualFs::isVirtual(path) && VirtualFs::isDirectory(path)) {
+        if(!exportVirtualDirectory(path, destDirectory + "/" + VirtualFs::fileName(path)))
+            mw->showError(tr("Could not copy folder ") + path);
+        return;
+    }
     QFileInfo srcFi(path);
+    const QString srcName = VirtualFs::isVirtual(path) ? VirtualFs::fileName(path) : srcFi.fileName();
 // SINGLE FILE COPY ===========================================================================
     if(!srcFi.isDir()) {
         FileOpResult result;
@@ -777,7 +829,7 @@ void Core::doInteractiveCopy(QString path, QString destDirectory, DialogResult &
         if(result == FileOpResult::DESTINATION_FILE_EXISTS) {
             if(overwriteFiles.all) // skipping all
                 return;
-            overwriteFiles = mw->fileReplaceDialog(srcFi.absoluteFilePath(), destDirectory + "/" + srcFi.fileName(), FILE_TO_FILE, true);
+            overwriteFiles = mw->fileReplaceDialog(srcFi.absoluteFilePath(), destDirectory + "/" + srcName, FILE_TO_FILE, true);
             if(!overwriteFiles || overwriteFiles.cancel)
                 return;
             FileOperations::copyFileTo(path, destDirectory, true, result);
@@ -837,7 +889,14 @@ void Core::interactiveMove(QList<QString> paths, QString destDirectory) {
 
 // todo: replacing DIR with a FILE?
 void Core::doInteractiveMove(QString path, QString destDirectory, DialogResult &overwriteFiles) {
+    if(VirtualFs::isVirtual(path) && VirtualFs::isDirectory(path)) {
+        // the container is read-only, moving a folder out of it is an export
+        if(!exportVirtualDirectory(path, destDirectory + "/" + VirtualFs::fileName(path)))
+            mw->showError(tr("Could not copy folder ") + path);
+        return;
+    }
     QFileInfo srcFi(path);
+    const QString srcName = VirtualFs::isVirtual(path) ? VirtualFs::fileName(path) : srcFi.fileName();
 // SINGLE FILE MOVE ===========================================================================
     if(!srcFi.isDir()) {
         FileOpResult result;
@@ -845,7 +904,7 @@ void Core::doInteractiveMove(QString path, QString destDirectory, DialogResult &
         if(result == FileOpResult::DESTINATION_FILE_EXISTS) {
             if(overwriteFiles.all) // skipping all
                 return;
-            overwriteFiles = mw->fileReplaceDialog(srcFi.absoluteFilePath(), destDirectory + "/" + srcFi.fileName(), FILE_TO_FILE, true);
+            overwriteFiles = mw->fileReplaceDialog(srcFi.absoluteFilePath(), destDirectory + "/" + srcName, FILE_TO_FILE, true);
             if(!overwriteFiles || overwriteFiles.cancel)
                 return;
             model->moveFileTo(path, destDirectory, true, result);
@@ -1122,8 +1181,8 @@ void Core::sortBySize() {
 void Core::showRenameDialog() {
     if(model->isEmpty())
         return;
-    QFileInfo fi(selectedPath());
-    mw->toggleRenameOverlay(fi.fileName());
+    const QString path = selectedPath();
+    mw->toggleRenameOverlay(VirtualFs::isVirtual(path) ? VirtualFs::fileName(path) : QFileInfo(path).fileName());
 }
 
 void Core::runScript(const QString &scriptName) {
@@ -1214,14 +1273,31 @@ bool Core::loadPath(QString path) {
         return false;
     if(path.startsWith("file://", Qt::CaseInsensitive))
         path.remove(0, 7);
+    // File associations and the shell hand us native separators
+    path = QDir::fromNativeSeparators(path);
+    // Opening an archive shows its contents as if it was a folder; archives
+    // stored inside an archive work the same way.
+    if(!path.endsWith('!') && VirtualFs::isArchivePath(path))
+        path += QLatin1Char('!');
 
     stopSlideshow();
     state.delayModel = false;
-    QFileInfo fileInfo(path);
-    if(fileInfo.isDir()) {
-        state.directoryPath = QDir(path).absolutePath();
-    } else if(fileInfo.isFile()) {
-        state.directoryPath = fileInfo.absolutePath();
+    const bool virtualPath = VirtualFs::isVirtual(path);
+    // relative paths from the shell/association need to be resolved first
+    if(!virtualPath) {
+        path = QFileInfo(path).absoluteFilePath();
+    } else {
+        QString archivePath;
+        QString innerPath;
+        if(VirtualFs::split(path, archivePath, innerPath))
+            path = VirtualFs::join(QFileInfo(archivePath).absoluteFilePath(), innerPath);
+    }
+    if(VirtualFs::isDirectory(path)) {
+        state.directoryPath = virtualPath ? path : QDir(path).absolutePath();
+        while(state.directoryPath.size() > 1 && state.directoryPath.endsWith('/'))
+            state.directoryPath.chop(1);
+    } else if(VirtualFs::exists(path)) {
+        state.directoryPath = VirtualFs::parentPath(path);
         if(model->directoryPath() != state.directoryPath)
             state.delayModel = true;
     } else {
@@ -1233,17 +1309,20 @@ bool Core::loadPath(QString path) {
         return false;
 
     // load file / folderview
-    if(fileInfo.isFile()) {
-        int index = model->indexOfFile(fileInfo.absoluteFilePath());
+    if(!VirtualFs::isDirectory(path)) {
+        const QString absPath = virtualPath ? path : QFileInfo(path).absoluteFilePath();
+        int index = model->indexOfFile(absPath);
         // DirectoryManager only checks file extensions via regex (performance reasons)
         // But in this case we force check mimetype
         if(index == -1) {
             QStringList types = settings->supportedMimeTypes();
             QMimeDatabase db;
-            QMimeType type = db.mimeTypeForFile(fileInfo.absoluteFilePath());
-            if(types.contains(type.name()) || EncryptedImage::isSupportedFormat(fileInfo.suffix())) {
-                if(model->forceInsert(fileInfo.absoluteFilePath())) {
-                    index = model->indexOfFile(fileInfo.absoluteFilePath());
+            QMimeType type = virtualPath
+                    ? db.mimeTypeForData(VirtualFs::readHead(absPath, 16384))
+                    : db.mimeTypeForFile(absPath);
+            if(types.contains(type.name()) || EncryptedImage::isSupportedFormat(VirtualFs::suffix(absPath))) {
+                if(model->forceInsert(absPath)) {
+                    index = model->indexOfFile(absPath);
                 }
             }
         }
@@ -1287,63 +1366,63 @@ bool Core::loadFileIndex(int index, bool async, bool preload) {
 }
 
 void Core::loadParentDir() {
-    if(model->directoryPath().isEmpty() || mw->currentViewMode() != MODE_FOLDERVIEW)
+    const QString dirPath = model->directoryPath();
+    if(dirPath.isEmpty() || mw->currentViewMode() != MODE_FOLDERVIEW)
         return;
     stopSlideshow();
-    QFileInfo currentDir(model->directoryPath());
-    QFileInfo parentDir(currentDir.absolutePath());
-    if(parentDir.exists() && parentDir.isReadable())
-        loadPath(parentDir.absoluteFilePath());
-    folderViewPresenter.selectAndFocus(currentDir.absoluteFilePath());
+    const QString parentPath = VirtualFs::parentPath(dirPath);
+    if(parentPath.isEmpty() || !VirtualFs::exists(parentPath))
+        return;
+    loadPath(parentPath);
+    folderViewPresenter.selectAndFocus(dirPath);
 }
 
 void Core::nextDirectory() {
-    if(model->directoryPath().isEmpty() || mw->currentViewMode() != MODE_DOCUMENT)
+    const QString dirPath = model->directoryPath();
+    if(dirPath.isEmpty() || mw->currentViewMode() != MODE_DOCUMENT)
         return;
     stopSlideshow();
-    QFileInfo currentDir(model->directoryPath());
-    QFileInfo parentDir(currentDir.absolutePath());
-    if(parentDir.exists() && parentDir.isReadable()) {
-        DirectoryManager dm;
-        if(!dm.setDirectory(parentDir.absoluteFilePath()))
+    const QString parentPath = VirtualFs::parentPath(dirPath);
+    if(parentPath.isEmpty() || !VirtualFs::exists(parentPath))
+        return;
+    DirectoryManager dm;
+    if(!dm.setDirectory(parentPath))
+        return;
+    QString next = dm.nextOfDir(dirPath);
+    if(!next.isEmpty()) {
+        if(!setDirectory(next))
             return;
-        QString next = dm.nextOfDir(model->directoryPath());
-        if(!next.isEmpty()) {
-            if(!setDirectory(next))
-                return;
-            QFileInfo fi(next);
-            mw->showMessageDirectory(fi.baseName());
-            if(model->fileCount())
-                loadFileIndex(0, false, true);
-        } else {
-            mw->showMessageDirectoryEnd();
-        }
+        mw->showMessageDirectory(VirtualFs::isVirtual(next) ? VirtualFs::fileName(next) : QFileInfo(next).baseName());
+        if(model->fileCount())
+            loadFileIndex(0, false, true);
+    } else {
+        mw->showMessageDirectoryEnd();
     }
 }
 
 void Core::prevDirectory(bool selectLast) {
-    if(model->directoryPath().isEmpty() || mw->currentViewMode() != MODE_DOCUMENT)
+    const QString dirPath = model->directoryPath();
+    if(dirPath.isEmpty() || mw->currentViewMode() != MODE_DOCUMENT)
         return;
-    QFileInfo currentDir(model->directoryPath());
-    QFileInfo parentDir(currentDir.absolutePath());
-    if(parentDir.exists() && parentDir.isReadable()) {
-        DirectoryManager dm;
-        dm.setDirectory(parentDir.absoluteFilePath());
-        QString prev = dm.prevOfDir(model->directoryPath());
-        if(!prev.isEmpty()) {
-            if(!setDirectory(prev))
-                return;
-            QFileInfo fi(prev);
-            mw->showMessageDirectory(fi.baseName());
-            if(model->fileCount()) {
-                if(selectLast)
-                    loadFileIndex(model->fileCount() - 1, false, true);
-                else
-                    loadFileIndex(0, false, true);
-            }
-        } else {
-            mw->showMessageDirectoryStart();
+    stopSlideshow();
+    const QString parentPath = VirtualFs::parentPath(dirPath);
+    if(parentPath.isEmpty() || !VirtualFs::exists(parentPath))
+        return;
+    DirectoryManager dm;
+    dm.setDirectory(parentPath);
+    QString prev = dm.prevOfDir(dirPath);
+    if(!prev.isEmpty()) {
+        if(!setDirectory(prev))
+            return;
+        mw->showMessageDirectory(VirtualFs::isVirtual(prev) ? VirtualFs::fileName(prev) : QFileInfo(prev).baseName());
+        if(model->fileCount()) {
+            if(selectLast)
+                loadFileIndex(model->fileCount() - 1, false, true);
+            else
+                loadFileIndex(0, false, true);
         }
+    } else {
+        mw->showMessageDirectoryStart();
     }
 }
 

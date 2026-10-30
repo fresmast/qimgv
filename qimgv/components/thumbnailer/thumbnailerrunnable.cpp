@@ -1,5 +1,8 @@
 #include "thumbnailerrunnable.h"
 #include "utils/encryptedimage.h"
+#include "utils/virtualfs.h"
+
+#include <QBuffer>
 
 ThumbnailerRunnable::ThumbnailerRunnable(ThumbnailCache* _cache, QString _path, int _size, bool _crop, bool _force) :
     path(_path),
@@ -92,8 +95,15 @@ ThumbnailerRunnable::~ThumbnailerRunnable() {
 }
 
 std::pair<QImage*, QSize> ThumbnailerRunnable::createThumbnail(QString path, const char *format, int size, bool squared) {
-    if(format && EncryptedImage::isSupportedFormat(QString::fromLatin1(format))) {
-        QImage *fullSize = new QImage(EncryptedImage::decode(path, QString::fromLatin1(format)));
+    const bool virtualPath = VirtualFs::isVirtual(path);
+    const QString formatString = format ? QString::fromLatin1(format) : QString();
+
+    if(EncryptedImage::isSupportedFormat(formatString)) {
+        QImage *fullSize = nullptr;
+        if(virtualPath)
+            fullSize = new QImage(EncryptedImage::decodeData(VirtualFs::readAll(path), formatString, path));
+        else
+            fullSize = new QImage(EncryptedImage::decode(path, formatString));
         if(fullSize->isNull()) {
             delete fullSize;
             return std::make_pair(new QImage(), QSize());
@@ -122,7 +132,25 @@ std::pair<QImage*, QSize> ThumbnailerRunnable::createThumbnail(QString path, con
         delete fullSize;
         return std::make_pair(result, originalSize);
     }
-    QImageReader *reader = new QImageReader(path, format);
+
+    // Archive entries are not real files, image readers have to work on a
+    // buffer holding the decompressed entry.
+    QByteArray fileData;
+    QBuffer buffer;
+    if(virtualPath) {
+        fileData = VirtualFs::readAll(path);
+        buffer.setData(fileData);
+        buffer.open(QIODevice::ReadOnly);
+    }
+    auto newReader = [&]() -> QImageReader* {
+        if(virtualPath) {
+            buffer.seek(0);
+            return new QImageReader(&buffer, format);
+        }
+        return new QImageReader(path, format);
+    };
+
+    QImageReader *reader = newReader();
     Qt::AspectRatioMode ARMode = squared?
                 (Qt::KeepAspectRatioByExpanding):(Qt::KeepAspectRatio);
     QImage *result = nullptr;
@@ -149,14 +177,21 @@ std::pair<QImage*, QSize> ThumbnailerRunnable::createThumbnail(QString path, con
             result = nullptr;
             // Force reset reader because it is really finicky
             // and can fail on the second read attempt (yeah wtf)
-            reader->setFileName("");
             delete reader;
-            reader = new QImageReader(path, format);
+            reader = newReader();
         }
     }
     if(manualResize) { // manual resize & crop. slower but should just work
         QImage *fullSize = new QImage();
         reader->read(fullSize);
+        if(fullSize->isNull() && !virtualPath) {
+            // The extension can lie: retry containers disguised as png.
+            const QString containerFormat = EncryptedImage::detectFormat(path);
+            if(!containerFormat.isEmpty()) {
+                delete fullSize;
+                fullSize = new QImage(EncryptedImage::decode(path, containerFormat));
+            }
+        }
         if(indexed) {
             auto newFmt = QImage::Format_RGB32;
             if(fullSize->hasAlphaChannel())
@@ -179,12 +214,15 @@ std::pair<QImage*, QSize> ThumbnailerRunnable::createThumbnail(QString path, con
         delete fullSize;
     }
     // force reader to close file so it can be deleted later
-    reader->setFileName("");
     delete reader;
     return std::make_pair(result, originalSize);
 }
 
 std::pair<QImage*, QSize> ThumbnailerRunnable::createVideoThumbnail(QString path, int size, bool squared) {
+    // Videos can not live inside a zip container (they are not listed), but
+    // guard anyway: mpv needs a real file.
+    if(VirtualFs::isVirtual(path))
+        return std::make_pair(new QImage(), QSize());
     QFileInfo fi(path);
     QImageReader reader;
     QString tmpFilePath = settings->tmpDir() + fi.fileName() + ".png";

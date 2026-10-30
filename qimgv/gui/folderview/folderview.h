@@ -6,6 +6,8 @@
 #include <QFileSystemModel>
 #include <QFileDialog>
 #include <QElapsedTimer>
+#include <QFileIconProvider>
+#include <QStandardItemModel>
 #include "gui/customwidgets/floatingwidgetcontainer.h"
 #include "gui/idirectoryview.h"
 #include "gui/folderview/foldergridview.h"
@@ -93,8 +95,21 @@ private slots:
     void onTreeViewTabOut();
 
 private:
+    // Archive entries are not part of the real filesystem, so browsing inside a
+    // zip swaps the tree over to a generated model showing the archive layout.
+    void refreshArchiveTree(const QString &path);
+    void fillArchiveDir(QStandardItem *parentItem, const QString &archivePath,
+                        const QString &innerPath, int depth);
+    QStandardItem *findArchiveItem(const QString &path) const;
+    void restoreFilesystemTree();
+    // Model swaps reset the header, so the "name only" layout is re-applied.
+    void setupFilesystemTree();
+
     Ui::FolderView *ui;
     FileSystemModelCustom *dirModel;
+    QStandardItemModel *archiveModel;
+    QFileIconProvider iconProvider;
+    QString archiveTreeRoot; // "path/to/archive.zip!" of the current tree
     FVOptionsPopup *optionsPopup;
     QElapsedTimer popupTimerClutch;
 };

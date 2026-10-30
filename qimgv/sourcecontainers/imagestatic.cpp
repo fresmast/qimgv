@@ -1,5 +1,9 @@
 #include "imagestatic.h"
 #include "utils/encryptedimage.h"
+#include "utils/virtualfs.h"
+
+#include <QBuffer>
+
 #include <time.h>
 
 ImageStatic::ImageStatic(QString _path)
@@ -31,8 +35,12 @@ void ImageStatic::load() {
 }
 
 void ImageStatic::loadEncrypted() {
-    std::unique_ptr<const QImage> img(
-        new QImage(EncryptedImage::decode(mPath, mDocInfo->format())));
+    QImage decoded;
+    if(VirtualFs::isVirtual(mPath))
+        decoded = EncryptedImage::decodeData(VirtualFs::readAll(mPath), mDocInfo->format(), mPath);
+    else
+        decoded = EncryptedImage::decode(mPath, mDocInfo->format());
+    std::unique_ptr<const QImage> img(new QImage(decoded));
     image = std::move(img);
     mLoaded = true;
 }
@@ -48,8 +56,22 @@ void ImageStatic::loadGeneric() {
      * tldr: qimage bad
      */
     QImage *tmp = new QImage();
+    const bool virtualPath = VirtualFs::isVirtual(mPath);
+    QByteArray fileData;
+    QBuffer buffer;
+    if(virtualPath) {
+        fileData = VirtualFs::readAll(mPath);
+        buffer.setData(fileData);
+        buffer.open(QIODevice::ReadOnly);
+    }
     {
-        QImageReader r(mPath, mDocInfo->format().toStdString().c_str());
+        QImageReader r;
+        if(virtualPath)
+            r.setDevice(&buffer);
+        else
+            r.setFileName(mPath);
+        if(!mDocInfo->format().isEmpty())
+            r.setFormat(mDocInfo->format().toStdString().c_str());
 #if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
         r.setAllocationLimit(settings->memoryAllocationLimit());
 #endif
@@ -59,10 +81,14 @@ void ImageStatic::loadGeneric() {
     // images named ".png". Qt cannot decode those, so give the container
     // decoder a chance before reporting a broken file.
     if(tmp->isNull()) {
-        const QString containerFormat = EncryptedImage::detectFormat(mPath);
+        const QString containerFormat =
+            EncryptedImage::detectFormat(VirtualFs::readHead(mPath, 64));
         if(!containerFormat.isEmpty()) {
             delete tmp;
-            tmp = new QImage(EncryptedImage::decode(mPath, containerFormat));
+            if(virtualPath)
+                tmp = new QImage(EncryptedImage::decodeData(fileData, containerFormat, mPath));
+            else
+                tmp = new QImage(EncryptedImage::decode(mPath, containerFormat));
         }
     }
     std::unique_ptr<const QImage> img(tmp);
@@ -82,6 +108,30 @@ void ImageStatic::loadGeneric() {
 
 // TODO: move this out somewhere to use in other places
 void ImageStatic::loadICO() {
+    if(VirtualFs::isVirtual(mPath)) {
+        const QByteArray data = VirtualFs::readAll(mPath);
+        QBuffer buffer;
+        buffer.setData(data);
+        buffer.open(QIODevice::ReadOnly);
+        QImageReader reader(&buffer, "ico");
+        // pick the largest icon, like QIcon does
+        int bestIndex = 0;
+        QSize bestSize;
+        const int imageCount = reader.imageCount();
+        for(int i = 0; i < imageCount; ++i) {
+            reader.jumpToImage(i);
+            const QSize size = reader.size();
+            if(size.width() > bestSize.width()) {
+                bestSize = size;
+                bestIndex = i;
+            }
+        }
+        reader.jumpToImage(bestIndex);
+        std::unique_ptr<const QImage> img(new QImage(reader.read()));
+        image = std::move(img);
+        mLoaded = true;
+        return;
+    }
     // Big brain code. It's mostly for small ico files so whatever. I'm not patching Qt for this.
     QIcon icon(mPath);
     QList<QSize> sizes = icon.availableSizes();
@@ -101,6 +151,12 @@ QString ImageStatic::generateHash(QString str) {
 
 // TODO: move saving to directorymodel
 bool ImageStatic::save(QString destPath) {
+    // Archive entries live inside a read-only container: writing them back is
+    // impossible, the caller has to pick a real destination.
+    if(VirtualFs::isVirtual(destPath)) {
+        qDebug() << "ImageStatic::save() - archive entries are read-only:" << destPath;
+        return false;
+    }
     // Writing encrypted RPG Maker containers is not supported. Refuse before
     // the backup/restore code below touches the original file.
     if(EncryptedImage::isSupportedFormat(QFileInfo(destPath).suffix())) {

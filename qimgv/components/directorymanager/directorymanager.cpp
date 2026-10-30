@@ -1,6 +1,29 @@
 #include "directorymanager.h"
 
+#include "utils/virtualfs.h"
+
+#include <chrono>
+
 namespace fs = std::filesystem;
+
+namespace {
+
+// FSEntry stores timestamps in the filesystem clock; archive entries only have
+// wall clock times, so convert and keep both sortable against each other.
+fs::file_time_type toFileTime(const QDateTime &dateTime) {
+    if(!dateTime.isValid())
+        return fs::file_time_type();
+    using file_clock = fs::file_time_type::clock;
+    const auto fileNow = file_clock::now().time_since_epoch();
+    const auto systemNow = std::chrono::duration_cast<file_clock::duration>(
+        std::chrono::system_clock::now().time_since_epoch());
+    const auto offset = fileNow - systemNow;
+    const auto sinceEpoch = std::chrono::duration_cast<file_clock::duration>(
+        std::chrono::milliseconds(dateTime.toMSecsSinceEpoch()));
+    return fs::file_time_type(sinceEpoch + offset);
+}
+
+} // namespace
 
 DirectoryManager::DirectoryManager() :
     watcher(nullptr),
@@ -106,6 +129,16 @@ bool DirectoryManager::setDirectory(QString dirPath) {
     if(dirPath.isEmpty()) {
         return false;
     }
+    if(VirtualFs::isVirtual(dirPath)) {
+        // archives are read-only, there is nothing to watch on disk
+        stopFileWatcher();
+        mListSource = SOURCE_DIRECTORY;
+        mDirectoryPath = dirPath;
+        loadEntryList(dirPath, false);
+        sortEntryLists();
+        emit loaded(dirPath);
+        return true;
+    }
     if(!std::filesystem::exists(toStdString(dirPath))) {
         qDebug() << "[DirectoryManager] Error - path does not exist.";
         return false;
@@ -132,6 +165,15 @@ bool DirectoryManager::setDirectory(QString dirPath) {
 bool DirectoryManager::setDirectoryRecursive(QString dirPath) {
     if(dirPath.isEmpty()) {
         return false;
+    }
+    if(VirtualFs::isVirtual(dirPath)) {
+        stopFileWatcher();
+        mListSource = SOURCE_DIRECTORY_RECURSIVE;
+        mDirectoryPath = dirPath;
+        loadEntryList(dirPath, true);
+        sortEntryLists();
+        emit loaded(dirPath);
+        return true;
     }
     if(!std::filesystem::exists(toStdString(dirPath))) {
         qDebug() << "[DirectoryManager] Error - path does not exist.";
@@ -265,10 +307,9 @@ const FSEntry &DirectoryManager::fileEntryAt(int index) const {
 }
 
 QDateTime DirectoryManager::lastModified(QString filePath) const {
-    QFileInfo info;
-    if(containsFile(filePath))
-        info.setFile(filePath);
-    return info.lastModified();
+    if(!containsFile(filePath))
+        return QDateTime();
+    return VirtualFs::lastModified(filePath);
 }
 
 // TODO: what about symlinks?
@@ -278,6 +319,8 @@ bool DirectoryManager::isSupportedFile(QString path) const {
 }
 
 bool DirectoryManager::isFile(QString path) const {
+    if(VirtualFs::isVirtual(path))
+        return !VirtualFs::isDirectory(path);
     if(!std::filesystem::exists(toStdString(path)))
         return false;
     if(!std::filesystem::is_regular_file(toStdString(path)))
@@ -286,6 +329,8 @@ bool DirectoryManager::isFile(QString path) const {
 }
 
 bool DirectoryManager::isDir(QString path) const {
+    if(VirtualFs::isVirtual(path))
+        return VirtualFs::isDirectory(path);
     if(!std::filesystem::exists(toStdString(path)))
         return false;
     if(!std::filesystem::is_directory(toStdString(path)))
@@ -311,6 +356,30 @@ bool DirectoryManager::containsDir(QString dirPath) const {
 void DirectoryManager::loadEntryList(QString directoryPath, bool recursive) {
     dirEntryVec.clear();
     fileEntryVec.clear();
+    if(VirtualFs::isVirtual(directoryPath)) {
+        std::vector<VirtualFs::Entry> entries;
+        VirtualFs::listDir(directoryPath, entries, recursive);
+        for(const VirtualFs::Entry &entry : entries) {
+            if(entry.isDir) {
+                FSEntry newEntry;
+                newEntry.name = entry.name;
+                newEntry.path = entry.path;
+                newEntry.isDirectory = true;
+                dirEntryVec.emplace_back(newEntry);
+            } else {
+                if(!regex.match(entry.name).hasMatch())
+                    continue;
+                FSEntry newEntry;
+                newEntry.name = entry.name;
+                newEntry.path = entry.path;
+                newEntry.isDirectory = false;
+                newEntry.size = entry.size;
+                newEntry.modifyTime = toFileTime(entry.mtime);
+                fileEntryVec.emplace_back(newEntry);
+            }
+        }
+        return;
+    }
     if(recursive) { // load files only
         addEntriesFromDirectoryRecursive(fileEntryVec, directoryPath);
     } else { // load dirs & files
@@ -353,6 +422,9 @@ void DirectoryManager::addEntriesFromDirectory(std::vector<FSEntry> &entryVec, Q
                 continue;
             }
             dirEntryVec.emplace_back(newEntry);
+        } else if (VirtualFs::isArchiveFile(name)) {
+            // archives are browsable as folders
+            dirEntryVec.emplace_back(FSEntry(VirtualFs::join(path, QString()), name, true));
         } else if (match.hasMatch()) {
             FSEntry newEntry;
             try {
@@ -370,13 +442,36 @@ void DirectoryManager::addEntriesFromDirectory(std::vector<FSEntry> &entryVec, Q
     }
 }
 
+void DirectoryManager::addEntriesFromArchive(std::vector<FSEntry> &entryVec, const QString &archivePath) {
+    std::vector<VirtualFs::Entry> entries;
+    if(!VirtualFs::listDir(VirtualFs::join(archivePath, QString()), entries, true))
+        return;
+    for(const VirtualFs::Entry &entry : entries) {
+        if(entry.isDir || !regex.match(entry.name).hasMatch())
+            continue;
+        FSEntry newEntry;
+        newEntry.name = entry.name;
+        newEntry.path = entry.path;
+        newEntry.isDirectory = false;
+        newEntry.size = entry.size;
+        newEntry.modifyTime = toFileTime(entry.mtime);
+        entryVec.emplace_back(newEntry);
+    }
+}
+
 void DirectoryManager::addEntriesFromDirectoryRecursive(std::vector<FSEntry> &entryVec, QString directoryPath) {
     QRegularExpressionMatch match;
     for(const auto & entry : fs::recursive_directory_iterator(toStdString(directoryPath))) {
         QString name = QString::fromStdString(entry.path().filename().generic_string());
         QString path = QString::fromStdString(entry.path().generic_string());
+        if(entry.is_directory())
+            continue;
+        if(VirtualFs::isArchiveFile(name)) {
+            addEntriesFromArchive(entryVec, path);
+            continue;
+        }
         match = regex.match(name);
-        if(!entry.is_directory() && match.hasMatch()) {
+        if(match.hasMatch()) {
             FSEntry newEntry;
             try {
                 newEntry.name = name;
@@ -427,10 +522,19 @@ bool DirectoryManager::insertFileEntry(const QString &filePath) {
 bool DirectoryManager::forceInsertFileEntry(const QString &filePath) {
     if(!this->isFile(filePath) || containsFile(filePath))
         return false;
-    std::filesystem::directory_entry stdEntry(toStdString(filePath));
-    QString fileName = QString::fromStdString(stdEntry.path().filename().generic_string()); // isn't it beautiful
-    FSEntry FSEntry(filePath, fileName, stdEntry.file_size(), stdEntry.last_write_time(), stdEntry.is_directory());
-    insert_sorted(fileEntryVec, FSEntry, std::bind(compareFunction(), this, std::placeholders::_1, std::placeholders::_2));
+    FSEntry entry;
+    if(VirtualFs::isVirtual(filePath)) {
+        VirtualFs::Entry archiveEntry;
+        if(!VirtualFs::stat(filePath, archiveEntry))
+            return false;
+        entry = FSEntry(filePath, archiveEntry.name, std::uintmax_t(archiveEntry.size),
+                        toFileTime(archiveEntry.mtime), false);
+    } else {
+        std::filesystem::directory_entry stdEntry(toStdString(filePath));
+        QString fileName = QString::fromStdString(stdEntry.path().filename().generic_string()); // isn't it beautiful
+        entry = FSEntry(filePath, fileName, stdEntry.file_size(), stdEntry.last_write_time(), stdEntry.is_directory());
+    }
+    insert_sorted(fileEntryVec, entry, std::bind(compareFunction(), this, std::placeholders::_1, std::placeholders::_2));
     if(!directoryPath().isEmpty()) {
         qDebug() << "fileIns" << filePath << directoryPath();
         emit fileAdded(filePath);
@@ -450,7 +554,15 @@ void DirectoryManager::removeFileEntry(const QString &filePath) {
 void DirectoryManager::updateFileEntry(const QString &filePath) {
     if(!containsFile(filePath))
         return;
-    FSEntry newEntry(filePath);
+    FSEntry newEntry;
+    if(VirtualFs::isVirtual(filePath)) {
+        VirtualFs::Entry archiveEntry;
+        if(VirtualFs::stat(filePath, archiveEntry))
+            newEntry = FSEntry(filePath, archiveEntry.name, std::uintmax_t(archiveEntry.size),
+                               toFileTime(archiveEntry.mtime), false);
+    } else {
+        newEntry = FSEntry(filePath);
+    }
     int index = indexOfFile(filePath);
     if(fileEntryVec.at(index).modifyTime != newEntry.modifyTime)
         fileEntryVec.at(index) = newEntry;
@@ -459,6 +571,8 @@ void DirectoryManager::updateFileEntry(const QString &filePath) {
 }
 
 void DirectoryManager::renameFileEntry(const QString &oldFilePath, const QString &newFileName) {
+    if(VirtualFs::isVirtual(oldFilePath))
+        return;
     QFileInfo fi(oldFilePath);
     QString newFilePath = fi.absolutePath() + "/" + newFileName;
     if(!containsFile(oldFilePath)) {
@@ -493,13 +607,16 @@ void DirectoryManager::renameFileEntry(const QString &oldFilePath, const QString
 bool DirectoryManager::insertDirEntry(const QString &dirPath) {
     if(containsDir(dirPath))
         return false;
-    std::filesystem::directory_entry stdEntry(toStdString(dirPath));
-    QString dirName = QString::fromStdString(stdEntry.path().filename().generic_string()); // isn't it beautiful
-    FSEntry FSEntry;
-    FSEntry.name = dirName;
-    FSEntry.path = dirPath;
-    FSEntry.isDirectory = true;
-    insert_sorted(dirEntryVec, FSEntry, std::bind(compareFunction(), this, std::placeholders::_1, std::placeholders::_2));
+    FSEntry entry;
+    entry.path = dirPath;
+    entry.isDirectory = true;
+    if(VirtualFs::isVirtual(dirPath)) {
+        entry.name = VirtualFs::fileName(dirPath);
+    } else {
+        std::filesystem::directory_entry stdEntry(toStdString(dirPath));
+        entry.name = QString::fromStdString(stdEntry.path().filename().generic_string()); // isn't it beautiful
+    }
+    insert_sorted(dirEntryVec, entry, std::bind(compareFunction(), this, std::placeholders::_1, std::placeholders::_2));
     qDebug() << "dirIns" << dirPath;
     emit dirAdded(dirPath);
     return true;
@@ -515,6 +632,8 @@ void DirectoryManager::removeDirEntry(const QString &dirPath) {
 }
 
 void DirectoryManager::renameDirEntry(const QString &oldDirPath, const QString &newDirName) {
+    if(VirtualFs::isVirtual(oldDirPath))
+        return;
     if(!containsDir(oldDirPath))
         return;
     QFileInfo fi(oldDirPath);
@@ -523,12 +642,11 @@ void DirectoryManager::renameDirEntry(const QString &oldDirPath, const QString &
     int oldIndex = indexOfDir(oldDirPath);
     dirEntryVec.erase(dirEntryVec.begin() + oldIndex);
     // insert
-    std::filesystem::directory_entry stdEntry(toStdString(newDirPath));
-    FSEntry FSEntry;
-    FSEntry.name = newDirName;
-    FSEntry.path = newDirPath;
-    FSEntry.isDirectory = true;
-    insert_sorted(dirEntryVec, FSEntry, std::bind(compareFunction(), this, std::placeholders::_1, std::placeholders::_2));
+    FSEntry entry;
+    entry.name = newDirName;
+    entry.path = newDirPath;
+    entry.isDirectory = true;
+    insert_sorted(dirEntryVec, entry, std::bind(compareFunction(), this, std::placeholders::_1, std::placeholders::_2));
     qDebug() << "dirRen" << oldDirPath << newDirPath;
     emit dirRenamed(oldDirPath, oldIndex, newDirPath, indexOfDir(newDirPath));
 }

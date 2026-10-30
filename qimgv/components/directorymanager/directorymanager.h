@@ -117,6 +117,7 @@ private:
 
     void addEntriesFromDirectory(std::vector<FSEntry> &entryVec, QString directoryPath);
     void addEntriesFromDirectoryRecursive(std::vector<FSEntry> &entryVec, QString directoryPath);
+    void addEntriesFromArchive(std::vector<FSEntry> &entryVec, const QString &archivePath);
     bool checkFileRange(int index) const;
     bool checkDirRange(int index) const;
 

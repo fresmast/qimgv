@@ -23,6 +23,7 @@ enum FileOpResult {
     DESTINATION_DOES_NOT_EXIST,
     DIRECTORY_NOT_EMPTY,
     NOTHING_TO_DO, // todo: maybe just return SUCCESS?
+    READ_ONLY, // archive entries can not be modified
     OTHER_ERROR
 };
 
@@ -40,4 +41,5 @@ public:
 private:
     static bool moveToTrashImpl(const QString &path);
     static QString generateHash(const QString &str);
+    static void copyVirtualFileTo(const QString &srcFilePath, const QString &destDirPath, bool force, FileOpResult &result);
 };

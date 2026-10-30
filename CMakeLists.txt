@@ -59,6 +59,8 @@ else()
     find_package(Qt${QT_VERSION_MAJOR} 5.12 REQUIRED COMPONENTS Core Widgets Svg PrintSupport)
 endif()
 
+find_package(ZLIB REQUIRED)
+
 if(EXIV2)
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(Exiv2 REQUIRED IMPORTED_TARGET exiv2)

@@ -1,5 +1,6 @@
 #include "mainwindow.h"
 #include "utils/encryptedimage.h"
+#include "utils/virtualfs.h"
 
 // TODO: nuke this and rewrite
 
@@ -290,7 +291,7 @@ void MW::onSortingChanged(SortingMode mode) {
 void MW::setDirectoryPath(QString path) {
     //closeImage();
     info.directoryPath = path;
-    info.directoryName = path.split("/").last();
+    info.directoryName = VirtualFs::fileName(path);
     folderView->setDirectoryPath(path);
     onInfoUpdated();
 }
@@ -569,13 +570,21 @@ QString MW::getSaveFileName(QString filePath) {
     QString filterString = filters.join(";; ");
 
     // find matching filter for the current image
-    QFileInfo fi(filePath);
+    QString savePath = filePath;
+    if(VirtualFs::isVirtual(filePath)) {
+        // archive entries are read-only, so default the dialog to the real folder
+        const QString name = VirtualFs::fileName(filePath);
+        const int dot = name.lastIndexOf('.');
+        const QString base = dot > 0 ? name.left(dot) : name;
+        savePath = VirtualFs::realDirectory(filePath) + "/" + base + ".png";
+    }
+    QFileInfo fi(savePath);
     QString selectedFilter = "JPEG (*.jpg *.jpeg *jpe *jfif)";
     if(EncryptedImage::isSupportedFormat(fi.suffix())) {
         // Encrypted containers are read-only; offer a normal PNG instead.
-        filePath = fi.absolutePath() + "/" + fi.completeBaseName() + ".png";
+        savePath = fi.absolutePath() + "/" + fi.completeBaseName() + ".png";
         selectedFilter = "PNG (*.png)";
-        fi.setFile(filePath);
+        fi.setFile(savePath);
     }
     for(auto filter : filters) {
         if(filter.contains(fi.suffix().toLower())) {
@@ -583,7 +592,7 @@ QString MW::getSaveFileName(QString filePath) {
             break;
         }
     }
-    QString newFilePath = QFileDialog::getSaveFileName(this, tr("Save File as..."), filePath, filterString, &selectedFilter);
+    QString newFilePath = QFileDialog::getSaveFileName(this, tr("Save File as..."), savePath, filterString, &selectedFilter);
     return newFilePath;
 }
 
@@ -592,6 +601,7 @@ void MW::showOpenDialog(QString path) {
 
     QFileDialog dialog(this);
     QStringList imageFilter;
+    imageFilter.append("Archives (*.zip)");
     imageFilter.append(settings->supportedFormatsFilter());
     imageFilter.append("All Files (*)");
     dialog.setDirectory(path);

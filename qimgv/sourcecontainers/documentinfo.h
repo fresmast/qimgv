@@ -48,7 +48,8 @@ public:
     QMap<QString, QString> getExifTags();
 
 private:
-    QFileInfo fileInfo;
+    // real file path or "archive.zip!inner/path"
+    QString mPath;
     DocumentType mDocumentType;
     int mOrientation;
     QString mFormat;

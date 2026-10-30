@@ -1,5 +1,8 @@
 #include "documentinfo.h"
 #include "utils/encryptedimage.h"
+#include "utils/virtualfs.h"
+
+#include <QBuffer>
 
 DocumentInfo::DocumentInfo(QString path)
     : mDocumentType(DocumentType::NONE),
@@ -7,8 +10,9 @@ DocumentInfo::DocumentInfo(QString path)
       mFormat(""),
       exifLoaded(false)
 {
-    fileInfo.setFile(path);
-    if(!fileInfo.isFile()) {
+    mPath = path;
+    VirtualFs::Entry entry;
+    if(!VirtualFs::stat(path, entry) || entry.isDir) {
         qDebug() << "FileInfo: cannot open: " << path;
         return;
     }
@@ -23,24 +27,33 @@ DocumentInfo::~DocumentInfo() {
 // ##############################################################
 
 QString DocumentInfo::directoryPath() const {
-    return fileInfo.absolutePath();
+    if(VirtualFs::isVirtual(mPath))
+        return VirtualFs::parentPath(mPath);
+    return QFileInfo(mPath).absolutePath();
 }
 
 QString DocumentInfo::filePath() const {
-    return fileInfo.absoluteFilePath();
+    if(VirtualFs::isVirtual(mPath))
+        return mPath;
+    return QFileInfo(mPath).absoluteFilePath();
 }
 
 QString DocumentInfo::fileName() const {
-    return fileInfo.fileName();
+    return VirtualFs::fileName(mPath);
 }
 
 QString DocumentInfo::baseName() const {
-    return fileInfo.baseName();
+    const QString name = fileName();
+    const int dot = name.lastIndexOf('.');
+    return dot > 0 ? name.left(dot) : name;
 }
 
 // bytes
 qint64 DocumentInfo::fileSize() const {
-    return fileInfo.size();
+    VirtualFs::Entry entry;
+    if(VirtualFs::stat(mPath, entry))
+        return entry.size;
+    return 0;
 }
 
 DocumentType DocumentInfo::type() const {
@@ -56,13 +69,13 @@ QString DocumentInfo::format() const {
 }
 
 QDateTime DocumentInfo::lastModified() const {
-    return fileInfo.lastModified();
+    return VirtualFs::lastModified(mPath);
 }
 
 // For cases like orientation / even mimetype change we just reload
 // Image from scratch, so don`t bother handling it here
 void DocumentInfo::refresh() {
-    fileInfo.refresh();
+    // archive entries are re-read from the archive; nothing to refresh
 }
 
 int DocumentInfo::exifOrientation() const {
@@ -75,14 +88,17 @@ int DocumentInfo::exifOrientation() const {
 void DocumentInfo::detectFormat() {
     if(mDocumentType != DocumentType::NONE)
         return;
-    const QString suffixString = fileInfo.suffix().toLower();
+    const QString suffixString = VirtualFs::suffix(mPath);
     if(EncryptedImage::isSupportedFormat(suffixString)) {
         mFormat = suffixString;
         mDocumentType = DocumentType::STATIC;
         return;
     }
     QMimeDatabase mimeDb;
-    mMimeType = mimeDb.mimeTypeForFile(fileInfo.filePath(), QMimeDatabase::MatchContent);
+    if(VirtualFs::isVirtual(mPath))
+        mMimeType = mimeDb.mimeTypeForData(VirtualFs::readHead(mPath, 16384));
+    else
+        mMimeType = mimeDb.mimeTypeForFile(mPath, QMimeDatabase::MatchContent);
     auto mimeName = mMimeType.name().toUtf8();
     auto suffix = suffixString.toUtf8();
     if(mimeName == "image/jpeg") {
@@ -121,7 +137,8 @@ void DocumentInfo::detectFormat() {
     } else {
         // Extensions can lie: some games ship their encrypted images with a
         // ".png" extension. Sniff the first bytes before giving up on the file.
-        const QString containerFormat = EncryptedImage::detectFormat(fileInfo.filePath());
+        const QString containerFormat =
+            EncryptedImage::detectFormat(VirtualFs::readHead(mPath, 64));
         if(!containerFormat.isEmpty()) {
             mFormat = containerFormat;
             mDocumentType = DocumentType::STATIC;
@@ -142,61 +159,40 @@ void DocumentInfo::detectFormat() {
 inline
 // dumb apng detector
 bool DocumentInfo::detectAPNG() {
-    QFile f(fileInfo.filePath());
-    if(f.open(QFile::ReadOnly)) {
-        QDataStream in(&f);
-        const int len = 120;
-        QByteArray qbuf("\0", len);
-        if (in.readRawData(qbuf.data(), len) > 0) {
-            return qbuf.contains("acTL");
-        }
-    }
-    return false;
+    return VirtualFs::readHead(mPath, 120).contains("acTL");
 }
 
 bool DocumentInfo::detectAnimatedWebP() {
-    QFile f(fileInfo.filePath());
-    bool result = false;
-    if(f.open(QFile::ReadOnly)) {
-        QDataStream in(&f);
-        in.skipRawData(12);
-        char *buf = static_cast<char*>(malloc(5));
-        buf[4] = '\0';
-        in.readRawData(buf, 4);
-        if(strcmp(buf, "VP8X") == 0) {
-            in.skipRawData(4);
-            char flags;
-            in.readRawData(&flags, 1);
-            if(flags & (1 << 1)) {
-                result = true;
-            }
-        }
-        free(buf);
-    }
-    return result;
+    const QByteArray head = VirtualFs::readHead(mPath, 64);
+    if(head.size() < 21)
+        return false;
+    const char *buf = head.constData();
+    if(std::memcmp(buf + 12, "VP8X", 4) != 0)
+        return false;
+    return (buf[20] & (1 << 1)) != 0;
 }
 
 // TODO avoid creating multiple QImageReader instances
 bool DocumentInfo::detectAnimatedJxl() {
-    QImageReader r(fileInfo.filePath(), "jxl");
+    if(VirtualFs::isVirtual(mPath)) {
+        const QByteArray data = VirtualFs::readAll(mPath);
+        if(data.isEmpty())
+            return false;
+        QBuffer buffer;
+        buffer.setData(data);
+        buffer.open(QIODevice::ReadOnly);
+        QImageReader reader(&buffer, "jxl");
+        return reader.supportsAnimation();
+    }
+    QImageReader r(mPath, "jxl");
     return r.supportsAnimation();
 }
 
 bool DocumentInfo::detectAnimatedAvif() {
-    QFile f(fileInfo.filePath());
-    bool result = false;
-    if(f.open(QFile::ReadOnly)) {
-        QDataStream in(&f);
-        in.skipRawData(4); // skip box size
-        char *buf = static_cast<char*>(malloc(9));
-        buf[8] = '\0';
-        in.readRawData(buf, 8);
-        if(strcmp(buf, "ftypavis") == 0) {
-            result = true;
-        }
-        free(buf);
-    }
-    return result;
+    const QByteArray head = VirtualFs::readHead(mPath, 32);
+    if(head.size() < 12)
+        return false;
+    return std::memcmp(head.constData() + 4, "ftypavis", 8) == 0;
 }
 
 void DocumentInfo::loadExifTags() {
@@ -206,15 +202,18 @@ void DocumentInfo::loadExifTags() {
     exifTags.clear();
     if(EncryptedImage::isSupportedFormat(mFormat))
         return;
+    // exiv2 needs a real file; archive entries are skipped
+    if(VirtualFs::isVirtual(mPath))
+        return;
 #ifdef USE_EXIV2
     try {
         std::unique_ptr<Exiv2::Image> image;
 
 #if EXIV2_TEST_VERSION(0, 28, 0)
         // Exiv2 0.28 removed the wide-string overload on Windows.
-        image = Exiv2::ImageFactory::open(fileInfo.filePath().toUtf8().toStdString());
+        image = Exiv2::ImageFactory::open(mPath.toUtf8().toStdString());
 #else
-        image = Exiv2::ImageFactory::open(toStdString(fileInfo.filePath()));
+        image = Exiv2::ImageFactory::open(toStdString(mPath));
 #endif
 
         assert(image.get() != 0);
@@ -324,12 +323,25 @@ void DocumentInfo::loadExifOrientation() {
        EncryptedImage::isSupportedFormat(mFormat))
         return;
 
-    QString path = filePath();
+    const std::string format = mFormat.toStdString();
+    QByteArray data;
+    QBuffer buffer;
     QImageReader *reader = nullptr;
-    if(!mFormat.isEmpty())
-        reader = new QImageReader(path, mFormat.toStdString().c_str());
-    else
-        reader = new QImageReader(path);
+    if(VirtualFs::isVirtual(mPath)) {
+        data = VirtualFs::readAll(mPath);
+        if(data.isEmpty())
+            return;
+        buffer.setData(data);
+        buffer.open(QIODevice::ReadOnly);
+        if(format.empty())
+            reader = new QImageReader(&buffer);
+        else
+            reader = new QImageReader(&buffer, format.c_str());
+    } else if(format.empty()) {
+        reader = new QImageReader(mPath);
+    } else {
+        reader = new QImageReader(mPath, format.c_str());
+    }
 
     if(reader->canRead())
         mOrientation = static_cast<int>(reader->transformation());
