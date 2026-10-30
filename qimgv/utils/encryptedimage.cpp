@@ -181,7 +181,7 @@ QImage EncryptedImage::decodeData(const QByteArray &data, const QString &format,
         return QImage();
     }
     if(RpgMakerImage::isSupportedFormat(format))
-        return RpgMakerImage::decodeImageData(data, name);
+        return RpgMakerImage::decodeEncryptedData(data, name);
     if(format.compare(QLatin1String("gax"), Qt::CaseInsensitive) != 0) {
         qWarning() << "EncryptedImage: unsupported container format" << format;
         return QImage();

@@ -23,6 +23,11 @@ public:
     // Returns a null QImage on failure.
     static QImage decode(const QString &path, const QString &format);
 
+    // Same as decode(), but takes the file contents. Used for archive entries
+    // and for files whose extension lies. "name" is only used for diagnostics
+    // and for looking up the project key next to real files.
+    static QImage decodeEncryptedData(const QByteArray &data, const QString &name);
+
     // Content based check: reports whether the first bytes of a file look like
     // an encrypted container rather than a real image. Used for files whose
     // extension lies, for example a MZ ".png_" image named ".png".
@@ -46,4 +51,7 @@ private:
     static QByteArray decrypt(const QByteArray &data, const QByteArray &key);
 
     static bool isKnownImageHeader(const QByteArray &header);
+    // True when the file starts with the "RPGMV" marker written by the MV
+    // engine; such files use the same layout as .png_ ones.
+    static bool hasRpgmvHeader(const QByteArray &data);
 };

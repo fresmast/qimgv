@@ -54,9 +54,16 @@ bool RpgMakerImage::looksEncrypted(const QByteArray &header) {
     // A normal image header means this is a real image, not a container.
     if(isKnownImageHeader(header.left(kFakeHeaderSize)))
         return false;
+    // "RPGMV" is the marker written by the RPG Maker MV engine itself.
+    if(hasRpgmvHeader(header))
+        return true;
     // Encrypted PNG payloads keep the plain IHDR data and a matching IHDR CRC
     // after the encrypted 16 byte header, which is a reliable signature.
     return isPngPayload(header);
+}
+
+bool RpgMakerImage::hasRpgmvHeader(const QByteArray &data) {
+    return data.size() >= 5 && data.startsWith("RPGMV");
 }
 
 QImage RpgMakerImage::decodeEncrypted(const QString &path) {
@@ -67,19 +74,22 @@ QImage RpgMakerImage::decodeEncrypted(const QString &path) {
     }
     const QByteArray data = file.readAll();
     file.close();
+    return decodeEncryptedData(data, path);
+}
 
+QImage RpgMakerImage::decodeEncryptedData(const QByteArray &data, const QString &name) {
     if(data.isEmpty()) {
-        qWarning() << "RpgMakerImage: empty file" << path;
+        qWarning() << "RpgMakerImage: empty file" << name;
         return QImage();
     }
 
     // Some tools strip the fake header and leave a normal image behind.
     // Accept these files as well instead of failing on them.
     if(isKnownImageHeader(data.left(kFakeHeaderSize)))
-        return decodeImageData(data, path);
+        return decodeImageData(data, name);
 
     if(data.size() < kFakeHeaderSize * 2) {
-        qWarning() << "RpgMakerImage: file is too short" << path;
+        qWarning() << "RpgMakerImage: file is too short" << name;
         return QImage();
     }
 
@@ -87,29 +97,36 @@ QImage RpgMakerImage::decodeEncrypted(const QString &path) {
     // from the known first 16 bytes without touching System.json at all.
     // Validate the following IHDR CRC first: for JPEG/WebP payloads the same
     // XOR trick would still produce a PNG-looking header and only fail later.
-    if(isPngPayload(data)) {
+    // Files written by the MV engine ("RPGMV" marker) always follow this
+    // layout, so they are accepted even when the CRC check cannot be made.
+    if(hasRpgmvHeader(data) || isPngPayload(data)) {
         const QByteArray pngKey = keyFromPngHeader(data);
         if(!pngKey.isEmpty()) {
-            const QImage image = decodeImageData(decrypt(data, pngKey), path);
+            const QImage image = decodeImageData(decrypt(data, pngKey), name);
             if(!image.isNull())
                 return image;
         }
     }
 
     // JPEG/WebP payloads require the project key from System.json or from
-    // rpg_core.js. Try every candidate until one passes the header check.
-    const QList<QByteArray> candidates = findKeyCandidates(path);
+    // rpg_core.js. Archive entries have no directory to search, so they are
+    // limited to the PNG header recovery above.
+    if(name.contains(QLatin1Char('!'))) {
+        qWarning() << "RpgMakerImage: no valid encryption key for" << name;
+        return QImage();
+    }
+    const QList<QByteArray> candidates = findKeyCandidates(name);
     for(const QByteArray &key : candidates) {
         if(key.size() < kKeySize)
             continue;
         if(!keyMatches(data, key))
             continue;
-        const QImage image = decodeImageData(decrypt(data, key), path);
+        const QImage image = decodeImageData(decrypt(data, key), name);
         if(!image.isNull())
             return image;
     }
 
-    qWarning() << "RpgMakerImage: no valid encryption key for" << path;
+    qWarning() << "RpgMakerImage: no valid encryption key for" << name;
     return QImage();
 }
 
